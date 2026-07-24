@@ -270,14 +270,27 @@ S1    S2    S3    S4    S5    S6    S7    S8    Pos    Active    Type    Bar
 ### Cloned from
 - Line Following v3.2 (.cpp8)
 
+### Changes from v3.2
+| Change | Before | After | Why |
+|--------|--------|-------|-----|
+| Kd | 0.8 | 0.3 | Reduce derivative noise amplification |
+| Derivative deadband | `abs(error) > 2` | `abs(error) > 10` | Ignore tiny fluctuations from RC sensor noise |
+
+### Current PID Tuning
+- `P0.04` `D0.3` `S100` (via Serial)
+
+### Known Issues
+- **Sometimes goes too far off field** — recovers and returns to line fine, but overshoots on entry
+- **Occasionally misses sharp turns** — not frequent, but happens on the tightest curves
+
 ### Status
-- **Active** — starting point for continued development
+- **Active** — mostly working, minor overshoot and sharp turn issues
 
 ### TODO
+- [ ] Fix overshoot on line re-entry (goes too far off field before returning)
+- [ ] Improve sharp turn handling (occasionally misses tight curves)
 - [ ] Add junction handling
-- [ ] Add search timeout / recovery improvements
 - [ ] Consider FSM (FOLLOWING / SEARCHING) architecture
-- [ ] Tune PID for specific track conditions
 
 ---
 

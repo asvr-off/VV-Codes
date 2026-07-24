@@ -1,0 +1,351 @@
+/*
+ * LFR with PID Control
+ * Hardware: Arduino Uno + QTR8C + TB6612FNG
+ *
+ * Connections:
+ * QTR8C (sensors on pins 2-9):
+ *   QTR-1  -> 2
+ *   QTR-2  -> 3
+ *   QTR-3  -> 4
+ *   QTR-4  -> 5
+ *   QTR-5  -> 6
+ *   QTR-6  -> 7
+ *   QTR-7  -> 8
+ *   QTR-8  -> 9
+ *   VCC    -> 5V
+ *   GND    -> GND
+ *   LED    -> VCC (always HIGH)
+ *
+ * TB6612FNG:
+ *   PWMA   -> 10 (PWM)
+ *   PWMB   -> 11 (PWM)
+ *   AIN1   -> 12
+ *   AIN2   -> 13
+ *   BIN1   -> A0
+ *   BIN2   -> A1
+ *   STBY   -> VCC (always HIGH)
+ *   VM     -> Motor VCC
+ *   VCC    -> 5V
+ *   GND    -> GND
+ */
+
+#include <Arduino.h>
+#include <QTRSensors.h>
+
+// ==================== PIN DEFINITIONS ====================
+// Motor A (Left)
+#define AIN1 12
+#define AIN2 13
+#define PWMA 10
+
+// Motor B (Right)
+#define BIN1 A0
+#define BIN2 A1
+#define PWMB 11
+
+// ==================== SENSOR SETUP ====================
+QTRSensors qtr;
+
+const uint8_t SENSOR_COUNT = 8;
+uint16_t sensorValues[SENSOR_COUNT];
+
+// ==================== PID VARIABLES ====================
+float Kp = 0.5;    // Proportional gain - tune this first
+float Ki = 0.0;    // Integral gain - tune this second
+float Kd = 1.0;    // Derivative gain - tune this third
+
+const float KP_MAX = 5.0;
+const float KI_MAX = 1.0;
+const float KD_MAX = 10.0;
+
+int lastError = 0;
+long integral = 0;
+
+// ==================== MOTOR SETTINGS ====================
+int baseSpeed = 150;   // Base speed (0-255)
+int maxSpeed = 255;    // Maximum motor speed
+int minSpeed = 0;      // Minimum motor speed
+
+// ==================== CALIBRATION ====================
+unsigned long calibrationStart;
+const unsigned long CALIBRATION_TIME = 4000; // 4 seconds
+
+// ==================== STATE ====================
+enum State {
+    CALIBRATING,
+    RUNNING,
+    STOPPED
+};
+
+State currentState = CALIBRATING;
+
+// ==================== MOTOR FUNCTIONS ====================
+void motorSetup() {
+    pinMode(AIN1, OUTPUT);
+    pinMode(AIN2, OUTPUT);
+    pinMode(PWMA, OUTPUT);
+    pinMode(BIN1, OUTPUT);
+    pinMode(BIN2, OUTPUT);
+    pinMode(PWMB, OUTPUT);
+}
+
+void setMotors(int leftSpeed, int rightSpeed) {
+    // Constrain speeds
+    leftSpeed = constrain(leftSpeed, -maxSpeed, maxSpeed);
+    rightSpeed = constrain(rightSpeed, -maxSpeed, maxSpeed);
+
+    // Left motor (forward = AIN1 HIGH, AIN2 LOW)
+    if (leftSpeed >= 0) {
+        digitalWrite(AIN1, HIGH);
+        digitalWrite(AIN2, LOW);
+    } else {
+        digitalWrite(AIN1, LOW);
+        digitalWrite(AIN2, HIGH);
+        leftSpeed = -leftSpeed;
+    }
+    analogWrite(PWMA, leftSpeed);
+
+    // Right motor (forward = BIN1 HIGH, BIN2 LOW)
+    if (rightSpeed >= 0) {
+        digitalWrite(BIN1, HIGH);
+        digitalWrite(BIN2, LOW);
+    } else {
+        digitalWrite(BIN1, LOW);
+        digitalWrite(BIN2, HIGH);
+        rightSpeed = -rightSpeed;
+    }
+    analogWrite(PWMB, rightSpeed);
+}
+
+void stopMotors() {
+    analogWrite(PWMA, 0);
+    analogWrite(PWMB, 0);
+}
+
+// ==================== SENSOR FUNCTIONS ====================
+void sensorSetup() {
+    qtr.setTypeAnalog();
+    qtr.setSensorPins((const uint8_t[]){2, 3, 4, 5, 6, 7, 8, 9}, SENSOR_COUNT);
+}
+
+void calibrateSensors() {
+    Serial.println("Calibrating... Move robot across the line");
+
+    unsigned long start = millis();
+    while (millis() - start < CALIBRATION_TIME) {
+        qtr.calibrate();
+        // Oscillate to cover the full sensor range
+        setMotors(100, -100);
+        delay(20);
+    }
+    stopMotors();
+
+    // Print calibration values
+    Serial.println("Calibration complete!");
+    Serial.print("Min: ");
+    for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+        Serial.print(qtr.calibrationOn.minimum[i]);
+        Serial.print("\t");
+    }
+    Serial.println();
+
+    Serial.print("Max: ");
+    for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+        Serial.print(qtr.calibrationOn.maximum[i]);
+        Serial.print("\t");
+    }
+    Serial.println();
+}
+
+// ==================== PID FUNCTION ====================
+int computePID() {
+    // Get line position (0 = on line, 7000 = off to one side)
+    uint16_t position = qtr.readLineBlack(sensorValues);
+
+    // Check if line is lost
+    bool onLine = false;
+    for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+        if (sensorValues[i] > 500) {
+            onLine = true;
+            break;
+        }
+    }
+
+    // If line is lost, maintain last direction or stop
+    if (!onLine) {
+        // Option 1: Stop
+        // return 0;
+
+        // Option 2: Keep turning in last direction
+        return (lastError > 0) ? maxSpeed : -maxSpeed;
+    }
+
+    // Calculate error: target is center (3500 for 8 sensors)
+    int error = position - 3500;
+
+    // PID calculation
+    integral += error;
+    integral = constrain(integral, -5000, 5000);  // Prevent integral windup
+
+    int derivative = error - lastError;
+    lastError = error;
+
+    int output = (Kp * error) + (Ki * integral) + (Kd * derivative);
+
+    return output;
+}
+
+// ==================== SERIAL INPUT FOR TUNING ====================
+void handleSerialInput() {
+    if (Serial.available()) {
+        char cmd = Serial.read();
+
+        switch (cmd) {
+            case 'p':
+            case 'P':
+                Kp = constrain(Serial.parseFloat(), 0.0, KP_MAX);
+                Serial.print("Kp = ");
+                Serial.println(Kp);
+                break;
+
+            case 'i':
+            case 'I':
+                Ki = constrain(Serial.parseFloat(), 0.0, KI_MAX);
+                Serial.print("Ki = ");
+                Serial.println(Ki);
+                break;
+
+            case 'd':
+            case 'D':
+                Kd = constrain(Serial.parseFloat(), 0.0, KD_MAX);
+                Serial.print("Kd = ");
+                Serial.println(Kd);
+                break;
+
+            case 's':
+            case 'S':
+                baseSpeed = Serial.parseInt();
+                Serial.print("Base Speed = ");
+                Serial.println(baseSpeed);
+                break;
+
+            case 'r':
+            case 'R':
+                // Reset integral
+                integral = 0;
+                lastError = 0;
+                Serial.println("PID reset");
+                break;
+
+            case 'x':
+            case 'X':
+                currentState = STOPPED;
+                stopMotors();
+                Serial.println("STOPPED");
+                break;
+
+            case 'g':
+            case 'G':
+                currentState = RUNNING;
+                Serial.println("RUNNING");
+                break;
+
+            case 'c':
+            case 'C':
+                currentState = CALIBRATING;
+                Serial.println("Recalibrating...");
+                break;
+
+            case 'h':
+            case 'H':
+                Serial.println("\n=== LFR PID Tuning ===");
+                Serial.println("Commands:");
+                Serial.println("  P<value> - Set Kp");
+                Serial.println("  I<value> - Set Ki");
+                Serial.println("  D<value> - Set Kd");
+                Serial.println("  S<value> - Set base speed");
+                Serial.println("  R        - Reset PID");
+                Serial.println("  G        - Go (start)");
+                Serial.println("  X        - Stop");
+                Serial.println("  C        - Recalibrate");
+                Serial.println("  H        - This help");
+                Serial.println("======================\n");
+                break;
+        }
+    }
+}
+
+// ==================== DEBUG OUTPUT ====================
+void printDebug() {
+    static unsigned long lastPrint = 0;
+    if (millis() - lastPrint >= 50) {  // 20Hz update rate
+        lastPrint = millis();
+
+        // Print sensor values
+        for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+            Serial.print(sensorValues[i]);
+            Serial.print('\t');
+        }
+
+        // Print position and error
+        uint16_t position = qtr.readLineBlack(sensorValues);
+        int error = position - 3500;
+        Serial.print("Pos:");
+        Serial.print(position);
+        Serial.print("\tErr:");
+        Serial.print(error);
+        Serial.print("\tInt:");
+        Serial.print(integral);
+        Serial.print("\tDer:");
+        Serial.print(error - lastError);
+        Serial.println();
+    }
+}
+
+// ==================== SETUP ====================
+void setup() {
+    Serial.begin(115200);
+    Serial.println("LFR PID Starting...");
+
+    motorSetup();
+    sensorSetup();
+
+    Serial.println("Press any key to start calibration...");
+    while (!Serial.available()) { delay(10); }
+    Serial.read();  // Clear the byte
+
+    calibrateSensors();
+
+    Serial.println("Ready! Send 'H' for help.");
+    currentState = RUNNING;
+}
+
+// ==================== LOOP ====================
+void loop() {
+    handleSerialInput();
+
+    switch (currentState) {
+        case CALIBRATING:
+            calibrateSensors();
+            currentState = RUNNING;
+            break;
+
+        case RUNNING: {
+            int pidOutput = computePID();
+
+            int leftSpeed = baseSpeed + pidOutput;
+            int rightSpeed = baseSpeed - pidOutput;
+
+            setMotors(leftSpeed, rightSpeed);
+
+            printDebug();
+            break;
+        }
+
+        case STOPPED:
+            stopMotors();
+            break;
+    }
+
+    delay(5);  // Small delay for stability
+}

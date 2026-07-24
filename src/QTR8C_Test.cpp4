@@ -1,0 +1,209 @@
+// Changelog:
+// - QTR8C sensor test with visual bar graph
+// - Binary thresholding for junction detection
+// - Pins: 2-9 (QTR1-QTR8)
+// - setTypeRC() for digital QTR8C module (was setTypeAnalog - fixed random readings)
+// - 115200 baud (was 9600 - updated for faster output)
+// - Junction detection: LEFT_T, RIGHT_T, T_JUNCTION, CROSS
+// - Visual bar graph: ## for detected, spaces for not
+// - Active sensor count display
+// - Maze solving implementation guide at end of file
+
+#include <Arduino.h>
+#include <QTRSensors.h>
+
+#define THRESHOLD 500  // Binary threshold for line detection
+
+QTRSensors qtr;
+const uint8_t SENSOR_COUNT = 8;
+uint16_t sensorValues[SENSOR_COUNT];
+
+// Junction patterns
+// Sensors: S1 S2 S3 S4 S5 S6 S7 S8
+// Left T:  1  1  1  0  0  0  0  0
+// Right T: 0  0  0  0  0  1  1  1
+// T-junc:  1  1  1  1  1  1  1  1
+// Cross:   1  1  1  1  1  1  1  1
+
+enum JunctionType {
+  NONE,
+  LINE,
+  LEFT_T,
+  RIGHT_T,
+  T_JUNCTION,
+  CROSS
+};
+
+JunctionType detectJunction(uint8_t activeCount, bool sensors[8]) {
+  if (activeCount <= 2) return LINE;
+  if (activeCount >= 7) return T_JUNCTION;
+
+  // Left T: sensors 0,1,2 active
+  if (sensors[0] && sensors[1] && sensors[2] && !sensors[5] && !sensors[6] && !sensors[7])
+    return LEFT_T;
+
+  // Right T: sensors 5,6,7 active
+  if (!sensors[0] && !sensors[1] && !sensors[2] && sensors[5] && sensors[6] && sensors[7])
+    return RIGHT_T;
+
+  return LINE;
+}
+
+const char* junctionName(JunctionType j) {
+  switch (j) {
+    case NONE: return "NONE";
+    case LINE: return "LINE";
+    case LEFT_T: return "LEFT_T";
+    case RIGHT_T: return "RIGHT_T";
+    case T_JUNCTION: return "T_JUNC";
+    case CROSS: return "CROSS";
+    default: return "?";
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  qtr.setTypeRC();
+  qtr.setSensorPins((const uint8_t[]){2, 3, 4, 5, 6, 7, 8, 9}, SENSOR_COUNT);
+
+  Serial.println("=== QTR8C Sensor Test ===");
+  Serial.println("Calibrating — sweep sensors over black + white now");
+  delay(500);
+  for (uint16_t i = 0; i < 250; i++) {
+    qtr.calibrate();
+  }
+  Serial.println("Calibration done!");
+
+  Serial.print("Min: ");
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+    Serial.print(qtr.calibrationOn.minimum[i]); Serial.print(" ");
+  }
+  Serial.println();
+
+  Serial.print("Max: ");
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+    Serial.print(qtr.calibrationOn.maximum[i]); Serial.print(" ");
+  }
+  Serial.println("\n");
+
+  Serial.println("S1\tS2\tS3\tS4\tS5\tS6\tS7\tS8\tPos\tActive\tType\tBar");
+  Serial.println("---\t---\t---\t---\t---\t---\t---\t---\t---\t------\t----\t---");
+}
+
+void loop() {
+  // One raw read, reused for both purposes
+  qtr.read(sensorValues);
+
+  // Binary check — junction detection
+  bool sensors[8];
+  uint8_t activeCount = 0;
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+    sensors[i] = (sensorValues[i] > THRESHOLD);
+    if (sensors[i]) activeCount++;
+  }
+
+  JunctionType jType = detectJunction(activeCount, sensors);
+
+  // Print raw values
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+    Serial.print(sensorValues[i]);
+    Serial.print("\t");
+  }
+
+  // Print position (0-7000, 3500 = center)
+  uint16_t position = qtr.readLineBlack(sensorValues);
+  Serial.print(position);
+  Serial.print("\t");
+
+  // Print active count
+  Serial.print(activeCount);
+  Serial.print("\t");
+
+  // Print junction type
+  Serial.print(junctionName(jType));
+  Serial.print("\t");
+
+  // Visual bar graph - ## for detected, spaces for not
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+    Serial.print(sensors[i] ? "##" : "  ");
+  }
+  Serial.println();
+
+  delay(100);
+}
+
+// =============================================================================
+// MAZE SOLVING IMPLEMENTATION GUIDE
+// =============================================================================
+//
+// To add maze solving, implement handleJunction() like this:
+//
+// 1. SIMPLE LEFT-HAND RULE (follow left wall):
+//
+//    void handleJunction(JunctionType jType) {
+//      stopMotors();
+//      delay(100);
+//
+//      switch (jType) {
+//        case LEFT_T:   // Left turn available - turn left
+//          turnLeft();
+//          break;
+//        case T_JUNC:   // Dead end or T - go left (priority)
+//        case CROSS:    // Crossroads - go left
+//          turnLeft();
+//          break;
+//        case RIGHT_T:  // Only right available - turn right
+//          turnRight();
+//          break;
+//        default:
+//          break;
+//      }
+//    }
+//
+// 2. PRIORITY-BASED (left > straight > right > U-turn):
+//
+//    void handleJunction(JunctionType jType, bool canGoStraight) {
+//      stopMotors();
+//      delay(100);
+//
+//      if (jType == LEFT_T) {
+//        turnLeft();
+//      } else if (jType == T_JUNC || jType == CROSS) {
+//        // Prefer left, then straight, then right
+//        if (canGoLeft()) turnLeft();
+//        else if (canGoStraight()) goStraight();
+//        else if (canGoRight()) turnRight();
+//        else uTurn();
+//      } else if (jType == RIGHT_T) {
+//        turnRight();
+//      }
+//    }
+//
+// 3. FLOOD FILL (advanced - needs map storage):
+//
+//    - Store grid cells in array, track visited/visited
+//    - At each junction, pick unvisited direction with lowest distance
+//    - Requires: grid[ROWS][COLS], distanceMap[][], stack for DFS
+//
+// Helper functions you'll need:
+//
+//    void stopMotors()   { brakeA(); brakeB(); }
+//    void goStraight()   { driveA(SPD); driveB(SPD); }
+//    void turnLeft()     { driveA(-SPD); driveB(SPD); delay(TURN_TIME); }
+//    void turnRight()    { driveA(SPD); driveB(-SPD); delay(TURN_TIME); }
+//    void uTurn()        { driveA(-SPD); driveB(SPD); delay(TURN_TIME * 2); }
+//
+// In your main loop:
+//
+//    if (jType != NONE && jType != LINE) {
+//      handleJunction(jType);
+//    } else {
+//      // Normal PID line following
+//      int error = position - 3500;
+//      int output = Kp * error + Kd * (error - lastError);
+//      driveA(baseSpeed + output);
+//      driveB(baseSpeed - output);
+//    }
+//
+// =============================================================================

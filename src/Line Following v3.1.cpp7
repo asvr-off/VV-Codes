@@ -1,0 +1,292 @@
+// Line Following v3.1 (ARCHIVED — sensor reversal fix)
+// Archived as .cpp7 — do not modify
+//
+// Status: Sensor pin order reversed for correct centroid math
+// Cloned to Line Following v3.2.cpp for continued development
+//
+// ==================== v3.1 CHANGES (from v3) ====================
+// - Sensor pin order reversed: {2,3,4,5,6,7,8,9} → {9,8,7,6,5,4,3,2}
+// - Fixes centroid skew: sensor 0 now = pin 9 = left side physically
+// - readLineBlack now returns ~3500 when line is centered
+// - Requires re-calibration after upload
+// ===================================================================
+//
+// ==================== v3 CHANGES (from v2) ====================
+// - Motor outputs allow negative values for full differential steering
+// - baseSpeed raised from 40 to 100 for steering headroom
+// - PID output clamp widened from ±60 to ±150
+// - Error scaling changed from /100 to /50 (doubled signal for sharper turns)
+// - LINE_LOST_THRESHOLD lowered from 500 to 200 (RC sensor dip tolerance)
+// - Line-lost behavior: recovery steering toward last known error direction
+// ===================================================================
+
+// Line Following v3.1
+// Cloned from Line Following v3 (.cpp6) — working version
+// Flow: Button → LED ON → Manual Calibration → LED OFF → Button → 2s delay → Follow line
+//
+// Pins:
+//   QTR8C: 2-9
+//   Motor A (Left):  PWMA=10, AIN1=12, AIN2=13
+//   Motor B (Right): PWMB=11, BIN1=A0, BIN2=A1
+//   Button: A2
+//   LED: A3
+//
+// PID Values & Limits:
+//   Kp = 0.5  (max: 5.0)
+//   Kd = 1.0  (max: 10.0)
+//   baseSpeed = 100
+//   maxSpeed = 255
+//
+// Serial Tuning Commands (115200 baud):
+//   P<value> - Set Kp (0-5)
+//   D<value> - Set Kd (0-10)
+//   S<value> - Set base speed (0-255)
+//   R        - Reset PID
+//   H        - Help
+
+#include <Arduino.h>
+#include <QTRSensors.h>
+
+// ==================== PIN DEFINITIONS ====================
+#define PWMA 10
+#define AIN1 12
+#define AIN2 13
+#define PWMB 11
+#define BIN1 A0
+#define BIN2 A1
+#define BTN  A2
+#define LED  A3
+
+// ==================== SENSOR SETUP ====================
+QTRSensors qtr;
+const uint8_t SENSOR_COUNT = 8;
+uint16_t sensorValues[SENSOR_COUNT];
+
+// Line loss detection — sensors below this = no black line detected
+const int LINE_LOST_THRESHOLD = 200;
+
+bool isLineLost() {
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+    if (sensorValues[i] > LINE_LOST_THRESHOLD) return false;
+  }
+  return true;  // All sensors below threshold = line lost
+}
+
+// ==================== PID VARIABLES ====================
+float Kp = 0.5;
+float Kd = 1.0;
+int lastError = 0;
+
+// PID Limits
+const float KP_MAX = 5.0;
+const float KD_MAX = 10.0;
+
+// Set to -1 if robot turns wrong direction (motors swapped)
+const int MOTOR_DIRECTION = -1;  // 1 = normal, -1 = inverted
+
+// ==================== MOTOR SETTINGS ====================
+int baseSpeed = 100;
+int maxSpeed = 255;
+
+// ==================== LED BLINK ====================
+unsigned long lastBlink = 0;
+bool ledState = false;
+
+// ==================== MOTOR FUNCTIONS ====================
+void setMotors(int leftSpeed, int rightSpeed) {
+  leftSpeed = constrain(leftSpeed, -maxSpeed, maxSpeed);
+  rightSpeed = constrain(rightSpeed, -maxSpeed, maxSpeed);
+
+  if (leftSpeed >= 0) {
+    digitalWrite(AIN1, HIGH);
+    digitalWrite(AIN2, LOW);
+  } else {
+    digitalWrite(AIN1, LOW);
+    digitalWrite(AIN2, HIGH);
+    leftSpeed = -leftSpeed;
+  }
+  analogWrite(PWMA, leftSpeed);
+
+  if (rightSpeed >= 0) {
+    digitalWrite(BIN1, HIGH);
+    digitalWrite(BIN2, LOW);
+  } else {
+    digitalWrite(BIN1, LOW);
+    digitalWrite(BIN2, HIGH);
+    rightSpeed = -rightSpeed;
+  }
+  analogWrite(PWMB, rightSpeed);
+}
+
+void stopMotors() {
+  analogWrite(PWMA, 0);
+  analogWrite(PWMB, 0);
+}
+
+void calibrateSensors() {
+  Serial.println("Calibrating — sweep robot over line manually...");
+  Serial.println("Move robot left/right over black line and white surface");
+  unsigned long start = millis();
+  while (millis() - start < 4000) {
+    qtr.calibrate();
+    delay(20);
+  }
+  stopMotors();
+
+  Serial.print("Min: ");
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+    Serial.print(qtr.calibrationOn.minimum[i]); Serial.print(" ");
+  }
+  Serial.println();
+
+  Serial.print("Max: ");
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+    Serial.print(qtr.calibrationOn.maximum[i]); Serial.print(" ");
+  }
+  Serial.println();
+}
+
+void handleSerialInput() {
+  if (Serial.available()) {
+    char cmd = Serial.read();
+    switch (cmd) {
+      case 'p': case 'P':
+        Kp = constrain(Serial.parseFloat(), 0.0, KP_MAX);
+        Serial.print("Kp = "); Serial.println(Kp);
+        break;
+      case 'd': case 'D':
+        Kd = constrain(Serial.parseFloat(), 0.0, KD_MAX);
+        Serial.print("Kd = "); Serial.println(Kd);
+        break;
+      case 's': case 'S':
+        baseSpeed = constrain(Serial.parseInt(), 0, 255);
+        Serial.print("Base Speed = "); Serial.println(baseSpeed);
+        break;
+      case 'r': case 'R':
+        lastError = 0;
+        Serial.println("PID reset");
+        break;
+      case 'h': case 'H':
+        Serial.println("\n=== PID Tuning ===");
+        Serial.println("  P<value> - Set Kp (0-5)");
+        Serial.println("  D<value> - Set Kd (0-10)");
+        Serial.println("  S<value> - Set speed (0-255)");
+        Serial.println("  R        - Reset PID");
+        Serial.println("  H        - Help");
+        Serial.println("==================\n");
+        break;
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  // Motor pins
+  pinMode(PWMA, OUTPUT);
+  pinMode(AIN1, OUTPUT);
+  pinMode(AIN2, OUTPUT);
+  pinMode(PWMB, OUTPUT);
+  pinMode(BIN1, OUTPUT);
+  pinMode(BIN2, OUTPUT);
+
+  // Button and LED
+  pinMode(BTN, INPUT_PULLUP);
+  pinMode(LED, OUTPUT);
+
+  // Sensor setup
+  qtr.setTypeRC();
+  qtr.setSensorPins((const uint8_t[]){9, 8, 7, 6, 5, 4, 3, 2}, SENSOR_COUNT);
+
+  stopMotors();
+  Serial.println("=== Line Following v3.1 ===");
+
+  // Step 1: Wait for first button press
+  Serial.println("Press button to start calibration...");
+  while (digitalRead(BTN) == HIGH) { delay(10); }
+  delay(200);  // debounce
+
+  // Step 1.5: LED ON, delay before calibration
+  digitalWrite(LED, HIGH);
+  Serial.println("Starting calibration in 1 second...");
+  delay(1000);
+
+  // Step 2: LED blinks during calibration
+  calibrateSensors();
+  digitalWrite(LED, LOW);  // LED OFF = calibration done
+  Serial.println("Calibration done!");
+
+  // Step 3: Wait for second button press
+  Serial.println("Press button to start following...");
+  while (digitalRead(BTN) == HIGH) { delay(10); }
+  delay(200);  // debounce
+
+  // Blink once to confirm
+  digitalWrite(LED, HIGH);
+  delay(100);
+  digitalWrite(LED, LOW);
+
+  // Step 4: Wait 2 seconds, then start
+  Serial.println("Starting in 2 seconds...");
+  delay(2000);
+
+  // Reset PID before starting
+  lastError = 0;
+  qtr.readLineBlack(sensorValues);  // Prime the sensor readings
+
+  Serial.println("Following line!");
+  Serial.println("Send 'H' for PID tuning help");
+}
+
+void loop() {
+  handleSerialInput();
+
+  // Read sensors and position
+  uint16_t position = qtr.readLineBlack(sensorValues);
+
+  // Line lost — steer toward last known direction instead of stopping
+  if (isLineLost()) {
+    digitalWrite(LED, HIGH);  // Solid LED = line lost
+    if (lastError > 0) {
+      setMotors(baseSpeed, -baseSpeed / 2);  // turn right
+    } else {
+      setMotors(-baseSpeed / 2, baseSpeed);  // turn left
+    }
+    delay(5);
+    return;
+  }
+
+  // PID line following
+  int error = (position - 3500) / 50;
+
+  int derivative = 0;
+  if (abs(error) > 2) {
+    derivative = error - lastError;
+  }
+  lastError = error;
+
+  int output = (Kp * error) + (Kd * derivative);
+  output = constrain(output, -150, 150);  // Clamp PID output
+  int pidOutput = output * MOTOR_DIRECTION;
+
+  // Allow negative wheel speeds for proper differential steering
+  int leftSpeed = constrain(baseSpeed + pidOutput, -maxSpeed, maxSpeed);
+  int rightSpeed = constrain(baseSpeed - pidOutput, -maxSpeed, maxSpeed);
+  setMotors(leftSpeed, rightSpeed);
+
+  // LED feedback
+  static unsigned long lastLedUpdate = 0;
+  if (millis() - lastLedUpdate >= 100) {
+    lastLedUpdate = millis();
+    int absError = abs(error);
+    if (absError > 20) {
+      digitalWrite(LED, HIGH);
+    } else if (absError > 10) {
+      digitalWrite(LED, (millis() / 50) % 2);
+    } else {
+      digitalWrite(LED, LOW);
+    }
+  }
+
+  delay(5);
+}

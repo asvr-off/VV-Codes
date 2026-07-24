@@ -1,0 +1,119 @@
+// Changelog:
+// - Added motorStop() for coast (power disconnect, both pins LOW)
+// - Changed SPD from uint8_t to int for negative values
+// - Added forward declarations for all functions
+// - Added button on A2 (INPUT_PULLUP) to start sequence
+// - Added coast steps (3s) after each brake in test sequence
+
+#include <Arduino.h>
+#include <SparkFun_TB6612.h>
+
+#define PWMA 10
+#define AIN1 12
+#define BIN1 A0
+#define PWMB 11
+#define AIN2 13
+#define BIN2 A1
+#define BTN A2
+
+const int SPD = 64; // ~25% of 255
+// STBY is hardwired HIGH — do not call any standby function
+
+// Forward declarations
+void driveA(int speed);
+void brakeA();
+void driveB(int speed);
+void brakeB();
+void motorStop();
+
+void setup() {
+  pinMode(PWMA, OUTPUT);
+  pinMode(AIN1, OUTPUT);
+  pinMode(AIN2, OUTPUT);
+  pinMode(PWMB, OUTPUT);
+  pinMode(BIN1, OUTPUT);
+  pinMode(BIN2, OUTPUT);
+  pinMode(BTN, INPUT_PULLUP);
+
+  motorStop(); // safe default state on boot
+
+  Serial.println("Press button to start...");
+  while (digitalRead(BTN) == HIGH) { delay(10); }
+  delay(200); // debounce
+}
+
+void loop() {
+  Serial.println("A forward");
+  driveA(SPD); delay(2000);
+
+  Serial.println("A brake");
+  brakeA(); delay(500);
+
+  Serial.println("A coast");
+  motorStop(); delay(3000);
+
+  Serial.println("A reverse");
+  driveA(-SPD); delay(2000);
+
+  Serial.println("A brake");
+  brakeA(); delay(500);
+
+  Serial.println("A coast");
+  motorStop(); delay(3000);
+
+  Serial.println("B forward");
+  driveB(SPD); delay(2000);
+
+  Serial.println("B brake");
+  brakeB(); delay(500);
+
+  Serial.println("B coast");
+  motorStop(); delay(3000);
+
+  Serial.println("B reverse");
+  driveB(-SPD); delay(2000);
+
+  Serial.println("B brake");
+  brakeB(); delay(500);
+
+  Serial.println("B coast");
+  motorStop(); delay(3000);
+
+  Serial.println("Both forward");
+  driveA(SPD); driveB(SPD); delay(2000);
+
+  Serial.println("Both brake");
+  brakeA(); brakeB(); delay(500);
+
+  Serial.println("Both coast");
+  motorStop(); delay(3000);
+}
+
+void driveA(int speed) { // -255..255
+  digitalWrite(AIN1, speed >= 0 ? HIGH : LOW);
+  digitalWrite(AIN2, speed >= 0 ? LOW  : HIGH);
+  analogWrite(PWMA, abs(speed));
+}
+void brakeA() {
+  digitalWrite(AIN1, HIGH);
+  digitalWrite(AIN2, HIGH);
+  analogWrite(PWMA, 0);
+}
+void driveB(int speed) {
+  digitalWrite(BIN1, speed >= 0 ? HIGH : LOW);
+  digitalWrite(BIN2, speed >= 0 ? LOW  : HIGH);
+  analogWrite(PWMB, abs(speed));
+}
+void brakeB() {
+  digitalWrite(BIN1, HIGH);
+  digitalWrite(BIN2, HIGH);
+  analogWrite(PWMB, 0);
+}
+void motorStop() {
+  digitalWrite(AIN1, LOW);
+  digitalWrite(AIN2, LOW);
+  analogWrite(PWMA, 0);
+  digitalWrite(BIN1, LOW);
+  digitalWrite(BIN2, LOW);
+  analogWrite(PWMB, 0);
+}

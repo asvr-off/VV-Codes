@@ -1,0 +1,62 @@
+// Changelog:
+// - LED debug test with 3 states (digital only, no PWM)
+// - Button on A2 (INPUT_PULLUP) to start
+// - LED on A3 (digital pin)
+
+#include <Arduino.h>
+
+#define LED_PIN A3
+#define BTN A2
+
+unsigned long ledTimer = 0;
+int ledState = 1;
+
+// State definitions:
+// 1 = ON - Constant high
+// 2 = Slow blink - 1000ms period
+// 3 = Fast blink - 100ms period
+
+void updateLED() {
+  unsigned long now = millis();
+  switch (ledState) {
+    case 1:
+      digitalWrite(LED_PIN, HIGH);
+      break;
+    case 2: {
+      bool on = (now / 500) % 2;
+      digitalWrite(LED_PIN, on ? HIGH : LOW);
+      break;
+    }
+    case 3: {
+      bool on = (now / 50) % 2;
+      digitalWrite(LED_PIN, on ? HIGH : LOW);
+      break;
+    }
+  }
+}
+
+void setup() {
+  pinMode(LED_PIN, OUTPUT);
+  pinMode(BTN, INPUT_PULLUP);
+  Serial.begin(115200);
+
+  digitalWrite(LED_PIN, LOW);
+  Serial.println("Press button to start...");
+  while (digitalRead(BTN) == HIGH) { delay(10); }
+  delay(200); // debounce
+  Serial.println("LED Debug Test Started");
+  ledTimer = millis();
+}
+
+void loop() {
+  updateLED();
+
+  // Cycle to next state every 3 seconds
+  if (millis() - ledTimer >= 3000) {
+    ledTimer = millis();
+    ledState++;
+    if (ledState > 3) ledState = 1;
+    Serial.print("LED State: ");
+    Serial.println(ledState);
+  }
+}

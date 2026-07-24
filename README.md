@@ -70,6 +70,10 @@ lib_deps =
     sparkfun/SparkFun TB6612FNG Motor Driver Library@^1.0.0
 ```
 
-## License
+⚠️ **NOTICE: EDUCATIONAL USE & NO AI TRAINING**  
+This repository is strictly for **educational, non-commercial, and personal learning purposes only**. 
 
-MIT
+* **No Commercial Use:** You may not sell, rent, or profit from this code.
+* **No AI Training:** Use of this source code, data, or documentation to train, fine-tune, or test machine learning models, large language models (LLMs), or automated code-generation tools (such as GitHub Copilot) is **strictly prohibited**.
+
+---
